@@ -1,0 +1,2 @@
+-- Copie miroir de database.sql pour compatibilité outillage
+-- Voir /database.sql pour la version maîtresse documentée

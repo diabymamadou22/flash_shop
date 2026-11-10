@@ -1,0 +1,8 @@
+{
+  "name": "FLASH-SHOP",
+  "description": "Application web complète de gestion commerciale et caisse POS pour boutique de matériels électroniques avec inventaire, ventes en FCFA, dépenses et intégration MySQL.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
