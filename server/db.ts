@@ -10,18 +10,38 @@ import Database from 'better-sqlite3';
 import path from 'path';
 import fs from 'fs';
 
-// Configuration depuis les variables d'environnement
-const MYSQL_CONFIG = {
-  host: process.env.MYSQL_HOST || 'localhost',
-  port: Number(process.env.MYSQL_PORT) || 3306,
-  user: process.env.MYSQL_USER || 'root',
-  password: process.env.MYSQL_PASSWORD || '',
-  database: process.env.MYSQL_DATABASE || 'flash_shop_db',
-  waitForConnections: true,
-  connectionLimit: 10,
-  queueLimit: 0,
-  decimalNumbers: true
-};
+function createMysqlPool(): mysql.Pool {
+  const connectionUri = process.env.DATABASE_URL || process.env.MYSQL_URL;
+  if (connectionUri) {
+    return mysql.createPool({
+      uri: connectionUri,
+      waitForConnections: true,
+      connectionLimit: 10,
+      queueLimit: 0,
+      decimalNumbers: true,
+      ssl: process.env.MYSQL_SSL === 'false' ? undefined : { rejectUnauthorized: false }
+    });
+  }
+
+  const host = process.env.MYSQL_HOST || 'localhost';
+  const port = Number(process.env.MYSQL_PORT) || 3306;
+  const user = process.env.MYSQL_USER || 'root';
+  const password = process.env.MYSQL_PASSWORD || '';
+  const database = process.env.MYSQL_DATABASE || 'flash_shop_db';
+
+  return mysql.createPool({
+    host,
+    port,
+    user,
+    password,
+    database,
+    waitForConnections: true,
+    connectionLimit: 10,
+    queueLimit: 0,
+    decimalNumbers: true,
+    ssl: process.env.MYSQL_SSL === 'true' ? { rejectUnauthorized: false } : undefined
+  });
+}
 
 export type DbDriver = 'mysql' | 'sqlite_fallback';
 
@@ -42,7 +62,7 @@ const state: DbState = {
 
 // Initialisation de la base SQLite locale
 function initSqliteFallback() {
-  const dataDir = path.resolve(process.cwd(), 'data');
+  const dataDir = process.env.VERCEL ? path.join('/tmp', 'data') : path.resolve(process.cwd(), 'data');
   if (!fs.existsSync(dataDir)) {
     fs.mkdirSync(dataDir, { recursive: true });
   }
@@ -334,22 +354,178 @@ function initSqliteFallback() {
   state.isConnected = true;
 }
 
+// Création automatique des tables et données MySQL si manquantes
+async function initMysqlTables(conn: mysql.PoolConnection): Promise<void> {
+  await conn.query(`
+    CREATE TABLE IF NOT EXISTS users (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      username VARCHAR(50) NOT NULL UNIQUE,
+      email VARCHAR(100) NOT NULL UNIQUE,
+      password_hash VARCHAR(255) NOT NULL,
+      full_name VARCHAR(100) NOT NULL,
+      role VARCHAR(20) NOT NULL DEFAULT 'ADMIN',
+      is_active TINYINT(1) NOT NULL DEFAULT 1,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `);
+
+  await conn.query(`
+    CREATE TABLE IF NOT EXISTS categories (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      name VARCHAR(100) NOT NULL UNIQUE,
+      description VARCHAR(255) NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `);
+
+  await conn.query(`
+    CREATE TABLE IF NOT EXISTS products (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      name VARCHAR(200) NOT NULL,
+      reference VARCHAR(100) NOT NULL UNIQUE,
+      category_id INT NOT NULL,
+      image_url TEXT NULL,
+      buy_price DECIMAL(12, 2) NOT NULL DEFAULT 0.00,
+      sell_price DECIMAL(12, 2) NOT NULL DEFAULT 0.00,
+      quantity INT NOT NULL DEFAULT 0,
+      alert_threshold INT NOT NULL DEFAULT 5,
+      description TEXT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      INDEX idx_products_ref (reference),
+      INDEX idx_products_cat (category_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `);
+
+  await conn.query(`
+    CREATE TABLE IF NOT EXISTS stock_movements (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      product_id INT NOT NULL,
+      type VARCHAR(30) NOT NULL,
+      quantity INT NOT NULL,
+      previous_stock INT NOT NULL,
+      new_stock INT NOT NULL,
+      reason VARCHAR(255) NOT NULL,
+      created_by INT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      INDEX idx_stock_mov_prod (product_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `);
+
+  await conn.query(`
+    CREATE TABLE IF NOT EXISTS sales (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      sale_number VARCHAR(50) NOT NULL UNIQUE,
+      total_amount DECIMAL(12, 2) NOT NULL,
+      amount_received DECIMAL(12, 2) NOT NULL,
+      change_returned DECIMAL(12, 2) NOT NULL DEFAULT 0.00,
+      payment_method VARCHAR(30) NOT NULL DEFAULT 'ESPECES',
+      status VARCHAR(20) NOT NULL DEFAULT 'VALIDEE',
+      user_id INT NULL,
+      notes TEXT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      INDEX idx_sales_num (sale_number)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `);
+
+  await conn.query(`
+    CREATE TABLE IF NOT EXISTS sale_items (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      sale_id INT NOT NULL,
+      product_id INT NULL,
+      product_name VARCHAR(200) NOT NULL,
+      product_ref VARCHAR(100) NOT NULL,
+      unit_price DECIMAL(12, 2) NOT NULL,
+      unit_cost DECIMAL(12, 2) NOT NULL DEFAULT 0.00,
+      quantity INT NOT NULL,
+      total_price DECIMAL(12, 2) NOT NULL,
+      INDEX idx_sale_items_sale (sale_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `);
+
+  await conn.query(`
+    CREATE TABLE IF NOT EXISTS expenses (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      title VARCHAR(200) NOT NULL,
+      category VARCHAR(50) NOT NULL,
+      amount DECIMAL(12, 2) NOT NULL,
+      description TEXT NULL,
+      expense_date VARCHAR(20) NOT NULL,
+      created_by INT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `);
+
+  await conn.query(`
+    CREATE TABLE IF NOT EXISTS settings (
+      id INT PRIMARY KEY,
+      shop_name VARCHAR(100) NOT NULL DEFAULT 'FLASH-SHOP',
+      shop_tagline VARCHAR(255) NOT NULL,
+      phone VARCHAR(50) NOT NULL,
+      email VARCHAR(100) NOT NULL,
+      address VARCHAR(255) NOT NULL,
+      city VARCHAR(100) NOT NULL,
+      currency VARCHAR(20) NOT NULL DEFAULT 'FCFA',
+      receipt_footer TEXT NOT NULL,
+      tax_rate DECIMAL(5, 2) NOT NULL DEFAULT 0.00,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `);
+
+  // Seeding initial MySQL si la table users est vide
+  const [userRows]: any = await conn.query('SELECT COUNT(*) as count FROM users');
+  if (userRows[0]?.count === 0) {
+    await conn.query(`
+      INSERT INTO users (id, username, email, password_hash, full_name, role)
+      VALUES (1, 'admin', 'admin@flash-shop.ci', '$2a$10$fG6a/19v62e/ZzH3z4z81e6QpZ/6eQo4a6mF7H8h3O7mK6H2j5g2a', 'Mamadou Diaby (Directeur)', 'ADMIN');
+    `);
+
+    await conn.query(`
+      INSERT INTO settings (id, shop_name, shop_tagline, phone, email, address, city, currency, receipt_footer, tax_rate)
+      VALUES (1, 'FLASH-SHOP', 'Vente de Matériels Électroniques & Accessoires High-Tech', '+225 07 88 99 00 11', 'contact@flash-shop.ci', 'Boulevard Giscard d''Estaing, Zone 4', 'Abidjan', 'FCFA', 'Merci de votre confiance ! Les matériels électroniques bénéficient d''une garantie constructeur de 12 mois.', 0.00);
+    `);
+
+    await conn.query(`
+      INSERT IGNORE INTO categories (id, name, description) VALUES
+      (1, 'Ordinateurs & Portables', 'PC portables professionnels, ultrabooks, stations de travail'),
+      (2, 'Smartphones & Tablettes', 'Téléphones intelligents haut de gamme, milieux de gamme et tablettes'),
+      (3, 'Audio & Casques', 'Casques sans fil, écouteurs Bluetooth et enceintes haute fidélité'),
+      (4, 'Accessoires & Câbles', 'Chargeurs rapides, adaptateurs, câbles USB-C, batteries externes'),
+      (5, 'Objets Connectés', 'Montres connectées, bracelets d''activité, domotique'),
+      (6, 'Stockage & Périphériques', 'Disques SSD externes, clés USB, souris ergonomiques, claviers');
+    `);
+
+    await conn.query(`
+      INSERT IGNORE INTO products (id, name, reference, category_id, image_url, buy_price, sell_price, quantity, alert_threshold, description) VALUES
+      (1, 'UltraBook Dell XPS 15 16GB/512GB SSD', 'LAP-DELL-XPS15', 1, '', 650000, 850000, 8, 3, 'Processeur Intel Core i7 13e Gen, Écran 15.6 pouces OLED 3.5K, Châssis aluminium usiné.'),
+      (2, 'Smartphone Samsung Galaxy S24 Ultra 256GB', 'PHN-GAL-S24U', 2, '', 580000, 725000, 12, 4, 'Capteur photo 200MP, S-Pen intégré, Écran Dynamic AMOLED 2X 120Hz, Cadre Titane.'),
+      (3, 'Casque Sans-Fil Sony WH-1000XM5 ANC', 'AUD-SONY-XM5', 3, '', 180000, 245000, 15, 5, 'Réduction de bruit active exceptionnelle, 30h d''autonomie, Audio Hi-Res sans fil LDAC.'),
+      (4, 'Chargeur Rapide Anker 65W GaN USB-C', 'ACC-ANK-65W', 4, '', 15000, 28000, 25, 10, 'Technologie GaNPrime ultra-compacte, 3 ports (2 USB-C + 1 USB-A), charge rapide universelle.'),
+      (5, 'Montre Connectée Apple Watch Series 9 45mm', 'WAT-APL-S9', 5, '', 260000, 330000, 6, 2, 'Puce S9 SiP, geste Toucher deux fois, suivi santé avancé ECG & SpO2.'),
+      (6, 'Disque SSD Externe Samsung T7 Shield 1TB', 'STK-SAM-T7-1TB', 6, '', 55000, 80000, 18, 5, 'Vitesse de transfert jusqu''à 1050 Mo/s, résistant aux chocs et intempéries IP65.'),
+      (7, 'Écouteurs Apple AirPods Pro 2 USB-C', 'AUD-APL-APP2', 3, '', 140000, 195000, 3, 5, 'Boîtier de charge MagSafe USB-C, réduction active du bruit 2x supérieure.'),
+      (8, 'Câble Tressé USB-C vers USB-C 100W 2M', 'ACC-CAB-100W', 4, '', 4000, 8500, 2, 8, 'Puissance supportée 100W Power Delivery, tressage nylon haute résistance.');
+    `);
+  }
+}
+
 // Tentative de connexion MySQL
 export async function initDatabase(): Promise<void> {
   try {
-    const pool = mysql.createPool(MYSQL_CONFIG);
-    // Test de connexion rapide
+    const pool = createMysqlPool();
     const connection = await pool.getConnection();
     await connection.ping();
+    await initMysqlTables(connection);
     connection.release();
 
     state.mysqlPool = pool;
     state.driver = 'mysql';
     state.isConnected = true;
-    console.log(`[FLASH-SHOP DB] Connecté avec succès au serveur MySQL (${MYSQL_CONFIG.host}:${MYSQL_CONFIG.port}/${MYSQL_CONFIG.database})`);
+    console.log(`[FLASH-SHOP DB] Connecté avec succès au serveur MySQL.`);
   } catch (err: any) {
     state.error = err.message;
-    console.warn(`[FLASH-SHOP DB] Impossible de joindre MySQL directement (${err.message}). Basculement automatique vers le moteur SQL relationnel intégré (better-sqlite3) pour assurer le fonctionnement continu.`);
+    console.warn(`[FLASH-SHOP DB] Impossible de joindre MySQL directement (${err.message}). Basculement automatique vers le moteur SQL relationnel persistant (better-sqlite3) pour assurer le fonctionnement continu.`);
     initSqliteFallback();
   }
 }
@@ -459,9 +635,9 @@ export async function getDbStatus() {
     return {
       driver: state.driver,
       isConnected: state.isConnected,
-      host: state.driver === 'mysql' ? MYSQL_CONFIG.host : 'Moteur SQL Local Embarqué (Mode Démo / Sandbox)',
-      database: state.driver === 'mysql' ? MYSQL_CONFIG.database : 'flash_shop.sqlite',
-      port: state.driver === 'mysql' ? MYSQL_CONFIG.port : 0,
+      host: state.driver === 'mysql' ? (process.env.MYSQL_HOST || 'Serveur MySQL') : 'Moteur SQL Local Persistant',
+      database: state.driver === 'mysql' ? (process.env.MYSQL_DATABASE || 'flash_shop_db') : 'flash_shop.sqlite',
+      port: state.driver === 'mysql' ? (Number(process.env.MYSQL_PORT) || 3306) : 0,
       totalProducts: (productsCount[0] as any)?.count || 0,
       totalSales: (salesCount[0] as any)?.count || 0,
       totalCategories: (categoriesCount[0] as any)?.count || 0,
